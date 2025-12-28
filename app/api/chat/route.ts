@@ -64,7 +64,7 @@ export async function POST(req: Request) {
     // MUDANÇA CRUCIAL: Usamos 'gemini-pro' (Estável)
     // E removemos o 'systemInstruction' daqui para não dar erro.
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash"
+      model: "gemini-1.5-flash-001"
       
     });
 
