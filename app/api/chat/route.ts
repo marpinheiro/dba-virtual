@@ -1,18 +1,40 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
+import { PrismaClient } from "@prisma/client";
+import { Ratelimit } from "@upstash/ratelimit";
+import { Redis } from "@upstash/redis";
 
-// Interface para garantir a tipagem
+// --- 1. CONFIGURAÇÃO DE TIPAGEM (Para o TypeScript não reclamar) ---
 interface MessageItem {
   role: string;
   content: string;
 }
 
-const apiKey = process.env.GEMINI_API_KEY;
+// --- 2. CONFIGURAÇÃO DO REDIS (RATE LIMIT) ---
+// Verifica se as chaves existem. Se não existirem (ex: ambiente local sem env), desativa o limitador.
+const redis = (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
+  ? new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    })
+  : null;
 
-if (!apiKey) {
-  throw new Error("GEMINI_API_KEY não encontrada no .env.local");
-}
+// Regra: 5 requisições a cada 15 minutos
+const ratelimit = redis
+  ? new Ratelimit({
+      redis: redis,
+      limiter: Ratelimit.slidingWindow(5, "60 m"),
+      analytics: true,
+    })
+  : null;
 
+// --- 3. CONFIGURAÇÃO DO BANCO (PRISMA) ---
+const globalForPrisma = global as unknown as { prisma: PrismaClient };
+const prisma = globalForPrisma.prisma || new PrismaClient();
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+
+// --- 4. CONFIGURAÇÃO GEMINI ---
+const apiKey = process.env.GEMINI_API_KEY!;
 const genAI = new GoogleGenerativeAI(apiKey);
 
 const SYSTEM_INSTRUCTION = `
@@ -24,13 +46,26 @@ DIRETRIZES:
 
 export async function POST(req: Request) {
   try {
+    // A. SEGURANÇA (RATE LIMIT)
+    if (ratelimit) {
+      const ip = req.headers.get("x-forwarded-for") || "ip-local";
+      const { success } = await ratelimit.limit(ip);
+
+      if (!success) {
+        return NextResponse.json(
+          { error: "Você atingiu o limite de 5 perguntas. Aguarde 60 minutos para continuar." },
+          { status: 429 }
+        );
+      }
+    }
+
+    // B. RECEBE DADOS
     const body = await req.json();
     const message: string = body.message;
-    const history: MessageItem[] = body.history;
+    // Aqui usamos a tipagem MessageItem[] para corrigir o erro do "any"
+    const history: MessageItem[] = body.history || [];
 
-    // --- CORREÇÃO FINAL BASEADA NO SEU JSON ---
-    // Sua lista JSON mostrou que você tem acesso ao "gemini-flash-latest".
-    // Esse é o alias correto para a versão Flash mais atual na sua conta.
+    // C. IA GERA RESPOSTA
     const model = genAI.getGenerativeModel({ 
       model: "gemini-flash-latest", 
       systemInstruction: SYSTEM_INSTRUCTION 
@@ -44,21 +79,32 @@ export async function POST(req: Request) {
     });
 
     const result = await chat.sendMessage(message);
-    const response = result.response.text();
+    const responseText = result.response.text();
 
-    return NextResponse.json({ result: response });
+    // D. SALVA NO BANCO
+    try {
+      await prisma.chatLog.create({
+        data: {
+          question: message,
+          answer: responseText,
+        }
+      });
+      console.log("✅ Log salvo.");
+    } catch (e) {
+      console.error("Erro banco (não fatal):", e);
+    }
 
-  } catch (error: unknown) { 
-    console.error("--- ERRO NO GEMINI ---", error);
+    return NextResponse.json({ result: responseText });
+
+  } catch (error: unknown) {
+    // Tratamento de erro tipado (substituindo o 'any')
+    console.error("--- ERRO GERAL ---", error);
     
     let errorMessage = "Erro interno.";
     if (error instanceof Error) {
       errorMessage = error.message;
     }
-
-    return NextResponse.json(
-      { error: `Erro na IA: ${errorMessage}` }, 
-      { status: 500 }
-    );
+    
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
