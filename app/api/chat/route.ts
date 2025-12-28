@@ -4,14 +4,22 @@ import { PrismaClient } from "@prisma/client";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
-// --- 1. CONFIGURAÇÃO DE TIPAGEM (Para o TypeScript não reclamar) ---
+// --- 1. CONFIGURAÇÃO ESSENCIAL PARA VERCEL ---
+export const dynamic = 'force-dynamic';
+
+// --- 2. CONFIGURAÇÃO DE TIPAGEM ---
 interface MessageItem {
   role: string;
   content: string;
 }
 
-// --- 2. CONFIGURAÇÃO DO REDIS (RATE LIMIT) ---
-// Verifica se as chaves existem. Se não existirem (ex: ambiente local sem env), desativa o limitador.
+// Interface para tratar o erro sem usar 'any'
+interface GoogleGenAIError {
+  message?: string;
+  status?: number;
+}
+
+// --- 3. CONFIGURAÇÃO DO REDIS (RATE LIMIT) ---
 const redis = (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
   ? new Redis({
       url: process.env.UPSTASH_REDIS_REST_URL,
@@ -19,7 +27,7 @@ const redis = (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_R
     })
   : null;
 
-// Regra: 5 requisições a cada 15 minutos
+// Regra: 5 requisições a cada 60 minutos
 const ratelimit = redis
   ? new Ratelimit({
       redis: redis,
@@ -28,12 +36,12 @@ const ratelimit = redis
     })
   : null;
 
-// --- 3. CONFIGURAÇÃO DO BANCO (PRISMA) ---
+// --- 4. CONFIGURAÇÃO DO BANCO (PRISMA) ---
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 const prisma = globalForPrisma.prisma || new PrismaClient();
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
-// --- 4. CONFIGURAÇÃO GEMINI ---
+// --- 5. CONFIGURAÇÃO GEMINI ---
 const apiKey = process.env.GEMINI_API_KEY!;
 const genAI = new GoogleGenerativeAI(apiKey);
 
@@ -62,12 +70,12 @@ export async function POST(req: Request) {
     // B. RECEBE DADOS
     const body = await req.json();
     const message: string = body.message;
-    // Aqui usamos a tipagem MessageItem[] para corrigir o erro do "any"
     const history: MessageItem[] = body.history || [];
 
     // C. IA GERA RESPOSTA
+    // Usando modelo com cota alta (1.5 Flash)
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash-001", 
+      model: "gemini-1.5-flash", 
       systemInstruction: SYSTEM_INSTRUCTION 
     });
 
@@ -90,21 +98,31 @@ export async function POST(req: Request) {
         }
       });
       console.log("✅ Log salvo.");
-    } catch (e) {
-      console.error("Erro banco (não fatal):", e);
+    } catch (dbError) {
+      console.error("Erro banco (não fatal):", dbError);
     }
 
     return NextResponse.json({ result: responseText });
 
-  } catch (error: unknown) {
-    // Tratamento de erro tipado (substituindo o 'any')
-    console.error("--- ERRO GERAL ---", error);
+  } catch (unknownError: unknown) {
+    // CORREÇÃO AQUI: Trocamos 'any' por 'unknown' e fazemos o cast seguro
+    console.error("--- ERRO NA IA ---", unknownError);
     
-    let errorMessage = "Erro interno.";
-    if (error instanceof Error) {
-      errorMessage = error.message;
+    // Tratamos o erro como um objeto que pode ter message ou status
+    const error = unknownError as GoogleGenAIError;
+    
+    let userMessage = "Ocorreu um erro interno. Tente novamente.";
+    let statusCode = 500;
+
+    // Lógica para detectar erro de Cota (429) ou Modelo não encontrado (404)
+    if (error.message?.includes('429') || error.status === 429) {
+      userMessage = "O sistema está com alto tráfego no momento (Limite da IA atingido). Por favor, tente novamente em alguns instantes.";
+      statusCode = 429;
+    } 
+    else if (error.message?.includes('404') || error.status === 404) {
+      userMessage = "Erro de configuração da IA (Modelo não encontrado ou biblioteca desatualizada).";
     }
-    
-    return NextResponse.json({ error: errorMessage }, { status: 500 });
+
+    return NextResponse.json({ error: userMessage }, { status: statusCode });
   }
 }
