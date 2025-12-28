@@ -15,7 +15,8 @@
 
 ## 📸 Preview
 
-![Interface do Chat](https://github.com/marpinheiro/dba-virtual/assets/placeholder-image.png)
+<img width="1906" height="846" alt="image" src="https://github.com/user-attachments/assets/a3af17ad-3422-4bd6-8440-448b734ba4b7" />
+
 
 ---
 
