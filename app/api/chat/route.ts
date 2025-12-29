@@ -4,7 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
-// 1. FORÇA O MODO DINÂMICO (Evita erro de Build da Vercel)
+// 1. FORÇA O MODO DINÂMICO
 export const dynamic = 'force-dynamic';
 
 // 2. CONFIGURAÇÃO DO BANCO (Singleton do Prisma)
@@ -12,9 +12,6 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient };
 const prisma = globalForPrisma.prisma || new PrismaClient();
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
-// --- AQUI ESTÁ O TRUQUE ---
-// Como o 'gemini-pro' antigo não aceita System Instruction nativo,
-// vamos mandar isso como texto normal no início.
 const SYSTEM_MESSAGE_TEXT = `
 INSTRUÇÃO DO SISTEMA: Você é o "CQLE DBA VIRTUAL", Consultor Sênior em Banco de Dados.
 DIRETRIZES:
@@ -37,9 +34,10 @@ export async function POST(req: Request) {
         url: process.env.UPSTASH_REDIS_REST_URL,
         token: process.env.UPSTASH_REDIS_REST_TOKEN,
       });
+      
       ratelimit = new Ratelimit({
         redis: redis,
-        limiter: Ratelimit.slidingWindow(5, "60 m"),
+        limiter: Ratelimit.slidingWindow(20, "60 m"), 
         analytics: true,
       });
     }
@@ -49,7 +47,7 @@ export async function POST(req: Request) {
       const { success } = await ratelimit.limit(ip);
       if (!success) {
         return NextResponse.json(
-          { error: "Você atingiu o limite de 5 perguntas. Aguarde 60 minutos." },
+          { error: "Limite de uso excedido (Rate Limit). Aguarde um pouco." },
           { status: 429 }
         );
       }
@@ -57,28 +55,27 @@ export async function POST(req: Request) {
 
     // B. CONFIGURAÇÃO GEMINI
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error("Chave Gemini não encontrada.");
+    if (!apiKey) {
+        return NextResponse.json({ error: "Configuração de API ausente (GEMINI_API_KEY)." }, { status: 500 });
+    }
     
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // MUDANÇA CRUCIAL: Usamos 'gemini-pro' (Estável)
-    // E removemos o 'systemInstruction' daqui para não dar erro.
+    // --- CORREÇÃO AQUI ---
+    // Usamos o 'gemini-1.5-flash' por ser o padrão estável global (Tier 1).
+    // O 2.0-flash às vezes requer endpoints v1beta específicos que variam por versão do SDK.
     const model = genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash-001"
-      
-    });
+      model: "gemini-flash-latest" 
+    },{apiVersion: "v1beta"});
 
     const body = await req.json();
     const message: string = body.message;
     const history: MessageItem[] = body.history || [];
 
-    // C. TRUQUE DO CONTEXTO
-    // Se não tiver histórico, adicionamos a instrução do sistema antes da pergunta
+    // C. CONTEXTO
     let finalMessage = message;
     
-    // Convertemos o histórico para o formato do Google
-    // Se o histórico estiver vazio, significa que é a primeira mensagem.
-    // Nesse caso, grudamos a instrução do sistema junto com a pergunta.
+    // Converte histórico para formato do Google
     const chatHistory = history.map((msg: MessageItem) => ({
       role: msg.role === 'user' ? 'user' : 'model',
       parts: [{ text: msg.content }],
@@ -92,6 +89,9 @@ export async function POST(req: Request) {
       history: chatHistory,
     });
 
+    console.log(`Enviando mensagem para Gemini (${message.substring(0, 20)}... model: gemini-flash-latest)`);
+
+    // Envio da mensagem
     const result = await chat.sendMessage(finalMessage);
     const responseText = result.response.text();
 
@@ -104,19 +104,34 @@ export async function POST(req: Request) {
         }
       });
     } catch (dbError) {
-      console.error("Erro banco:", dbError);
+      console.error("Erro ao salvar no banco (não crítico):", dbError);
     }
 
     return NextResponse.json({ result: responseText });
 
   } catch (unknownError: unknown) {
-    console.error("--- ERRO ---", unknownError);
-    const error = unknownError as { message?: string, status?: number };
+    console.error("--- ERRO CRÍTICO NA API ---");
+    console.error(unknownError);
     
-    let msg = "Erro interno.";
-    if (error.message?.includes('429')) msg = "Sistema sobrecarregado (Cota). Tente depois.";
-    if (error.message?.includes('404')) msg = "Erro de Modelo (404).";
+    let errorMessage = "Erro desconhecido";
+    
+    if (unknownError instanceof Error) {
+        errorMessage = unknownError.message;
+    } else if (typeof unknownError === "object" && unknownError !== null && "message" in unknownError) {
+        errorMessage = String((unknownError as { message: unknown }).message);
+    } else if (typeof unknownError === "string") {
+        errorMessage = unknownError;
+    }
 
-    return NextResponse.json({ error: msg }, { status: 500 });
+    let msg = "Erro interno no servidor.";
+    
+    // Tratamento específico do erro atual
+    if (errorMessage.includes('fetch failed')) {
+        msg = "Falha de conexão do Node.js com o Google. Verifique sua internet ou firewall.";
+    }
+    if (errorMessage.includes('404')) msg = "Modelo não encontrado (404).";
+    if (errorMessage.includes('429')) msg = "Sistema sobrecarregado (429).";
+
+    return NextResponse.json({ error: msg, details: errorMessage }, { status: 500 });
   }
 }
