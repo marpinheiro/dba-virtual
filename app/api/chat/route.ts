@@ -3,11 +3,21 @@ import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import dns from 'node:dns';
+
+// 0. CORREÇÃO DE CONEXÃO (Lentidão/Timeout)
+// Força o Node a usar IPv4 para conectar rápido no banco Neon
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch (e) {
+  // Ignora se o ambiente não suportar
+}
 
 // 1. FORÇA O MODO DINÂMICO
 export const dynamic = 'force-dynamic';
 
 // 2. CONFIGURAÇÃO DO BANCO (Singleton do Prisma)
+// Garante que não abra múltiplas conexões no hot-reload
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 const prisma = globalForPrisma.prisma || new PrismaClient();
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
@@ -61,9 +71,6 @@ export async function POST(req: Request) {
     
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // --- CORREÇÃO AQUI ---
-    // Usamos o 'gemini-1.5-flash' por ser o padrão estável global (Tier 1).
-    // O 2.0-flash às vezes requer endpoints v1beta específicos que variam por versão do SDK.
     const model = genAI.getGenerativeModel({ 
       model: "gemini-flash-latest" 
     },{apiVersion: "v1beta"});
@@ -71,11 +78,13 @@ export async function POST(req: Request) {
     const body = await req.json();
     const message: string = body.message;
     const history: MessageItem[] = body.history || [];
+    
+    // (Futuro) Se o front mandar sessionId, usamos ele. Por enquanto, será undefined.
+    const requestSessionId: string | undefined = body.sessionId; 
 
     // C. CONTEXTO
     let finalMessage = message;
     
-    // Converte histórico para formato do Google
     const chatHistory = history.map((msg: MessageItem) => ({
       role: msg.role === 'user' ? 'user' : 'model',
       parts: [{ text: msg.content }],
@@ -95,18 +104,49 @@ export async function POST(req: Request) {
     const result = await chat.sendMessage(finalMessage);
     const responseText = result.response.text();
 
-    // D. SALVAR NO BANCO
+    // D. SALVAR NO BANCO (NOVA ESTRUTURA: Sessão + Mensagens)
     try {
-      await prisma.chatLog.create({
+      let sessionId = requestSessionId;
+
+      // Se não tem ID de sessão (primeira mensagem), cria uma nova conversa
+      if (!sessionId) {
+        const title = message.length > 30 ? message.substring(0, 30) + "..." : message;
+        
+        const newSession = await prisma.chatSession.create({
+          data: {
+            title: title,
+          }
+        });
+        sessionId = newSession.id;
+      }
+
+      // Agora salva as mensagens ligadas a essa sessão
+      // 1. Pergunta do Usuário
+      await prisma.chatMessage.create({
         data: {
-          question: message,
-          answer: responseText,
+          role: 'user',
+          content: message,
+          sessionId: sessionId
         }
       });
+
+      // 2. Resposta da IA
+      await prisma.chatMessage.create({
+        data: {
+          role: 'assistant',
+          content: responseText,
+          sessionId: sessionId
+        }
+      });
+
+      console.log(`Dados salvos na Sessão ID: ${sessionId}`);
+
     } catch (dbError) {
-      console.error("Erro ao salvar no banco (não crítico):", dbError);
+      // Loga o erro mas não trava a resposta para o usuário
+      console.error("Erro ao salvar no banco (Prisma):", dbError);
     }
 
+    // Retorna o resultado (e o sessionId caso o front queira usar na próxima)
     return NextResponse.json({ result: responseText });
 
   } catch (unknownError: unknown) {
@@ -125,7 +165,6 @@ export async function POST(req: Request) {
 
     let msg = "Erro interno no servidor.";
     
-    // Tratamento específico do erro atual
     if (errorMessage.includes('fetch failed')) {
         msg = "Falha de conexão do Node.js com o Google. Verifique sua internet ou firewall.";
     }
