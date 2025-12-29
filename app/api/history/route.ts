@@ -1,21 +1,22 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma"; // Importando do arquivo que criamos no passo 1
+import { prisma } from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic'; // Garante que não faça cache velho
+export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    // Busca as sessões ordenadas pela mais recente
+    const userId = request.headers.get("x-user-id");
+
+    if (!userId) {
+        return NextResponse.json([]); 
+    }
+
     const sessions = await prisma.chatSession.findMany({
+      where: {
+        userId: userId, // <--- FILTRA SÓ AS CONVERSAS DESTE USUÁRIO
+      },
       orderBy: {
         createdAt: 'desc',
-      },
-      include: {
-        // Opcional: Pegar a primeira mensagem só pra mostrar um "preview" se quiser
-        messages: {
-          take: 1,
-          orderBy: { createdAt: 'desc' }
-        }
       }
     });
 

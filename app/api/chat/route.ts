@@ -1,26 +1,18 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { prisma } from "@/lib/prisma"; // Importando a conexão centralizada
 import dns from 'node:dns';
 
-// 0. CORREÇÃO DE CONEXÃO (Lentidão/Timeout)
-// Força o Node a usar IPv4 para conectar rápido no banco Neon
+// Fix DNS para evitar timeouts na conexão
 try {
   dns.setDefaultResultOrder('ipv4first');
-} catch (e) {
-  // Ignora se o ambiente não suportar
+} catch {
+  // Ignora se não suportado
 }
 
-// 1. FORÇA O MODO DINÂMICO
 export const dynamic = 'force-dynamic';
-
-// 2. CONFIGURAÇÃO DO BANCO (Singleton do Prisma)
-// Garante que não abra múltiplas conexões no hot-reload
-const globalForPrisma = global as unknown as { prisma: PrismaClient };
-const prisma = globalForPrisma.prisma || new PrismaClient();
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 const SYSTEM_MESSAGE_TEXT = `
 INSTRUÇÃO DO SISTEMA: Você é o "CQLE DBA VIRTUAL", Consultor Sênior em Banco de Dados.
@@ -30,62 +22,45 @@ DIRETRIZES:
 Seja direto e técnico.
 `;
 
-interface MessageItem {
+interface MessageHistory {
   role: string;
   content: string;
 }
 
 export async function POST(req: Request) {
   try {
-    // A. RATE LIMIT (Proteção)
-    let ratelimit = null;
+    // 1. Rate Limit (Opcional - Proteção contra abuso)
     if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
       const redis = new Redis({
         url: process.env.UPSTASH_REDIS_REST_URL,
         token: process.env.UPSTASH_REDIS_REST_TOKEN,
       });
-      
-      ratelimit = new Ratelimit({
+      const ratelimit = new Ratelimit({
         redis: redis,
         limiter: Ratelimit.slidingWindow(20, "60 m"), 
         analytics: true,
       });
-    }
-
-    if (ratelimit) {
       const ip = req.headers.get("x-forwarded-for") || "ip-local";
       const { success } = await ratelimit.limit(ip);
-      if (!success) {
-        return NextResponse.json(
-          { error: "Limite de uso excedido (Rate Limit). Aguarde um pouco." },
-          { status: 429 }
-        );
-      }
+      if (!success) return NextResponse.json({ error: "Muitas requisições. Aguarde um pouco." }, { status: 429 });
     }
 
-    // B. CONFIGURAÇÃO GEMINI
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-        return NextResponse.json({ error: "Configuração de API ausente (GEMINI_API_KEY)." }, { status: 500 });
-    }
+    if (!apiKey) return NextResponse.json({ error: "API Key ausente." }, { status: 500 });
     
     const genAI = new GoogleGenerativeAI(apiKey);
-
-    const model = genAI.getGenerativeModel({ 
-      model: "gemini-flash-latest" 
-    },{apiVersion: "v1beta"});
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" },{apiVersion: "v1beta"});
 
     const body = await req.json();
     const message: string = body.message;
-    const history: MessageItem[] = body.history || [];
-    
-    // (Futuro) Se o front mandar sessionId, usamos ele. Por enquanto, será undefined.
-    const requestSessionId: string | undefined = body.sessionId; 
+    const history: MessageHistory[] = body.history || [];
+    const requestSessionId: string | undefined = body.sessionId;
+    const userId = req.headers.get("x-user-id") || "anonimo";
 
-    // C. CONTEXTO
     let finalMessage = message;
     
-    const chatHistory = history.map((msg: MessageItem) => ({
+    // Prepara histórico para o formato do Google
+    const chatHistory = history.map((msg: MessageHistory) => ({
       role: msg.role === 'user' ? 'user' : 'model',
       parts: [{ text: msg.content }],
     }));
@@ -94,83 +69,57 @@ export async function POST(req: Request) {
         finalMessage = `${SYSTEM_MESSAGE_TEXT}\n\nPERGUNTA DO USUÁRIO: ${message}`;
     }
 
-    const chat = model.startChat({
-      history: chatHistory,
-    });
-
-    console.log(`Enviando mensagem para Gemini (${message.substring(0, 20)}... model: gemini-flash-latest)`);
-
-    // Envio da mensagem
+    const chat = model.startChat({ history: chatHistory });
+    console.log(`Enviando mensagem para Gemini...`);
+    
     const result = await chat.sendMessage(finalMessage);
     const responseText = result.response.text();
 
-    // D. SALVAR NO BANCO (NOVA ESTRUTURA: Sessão + Mensagens)
+    // Salvar no Banco
     try {
       let sessionId = requestSessionId;
 
-      // Se não tem ID de sessão (primeira mensagem), cria uma nova conversa
       if (!sessionId) {
         const title = message.length > 30 ? message.substring(0, 30) + "..." : message;
         
         const newSession = await prisma.chatSession.create({
           data: {
             title: title,
+            userId: userId,
           }
         });
         sessionId = newSession.id;
       }
 
-      // Agora salva as mensagens ligadas a essa sessão
-      // 1. Pergunta do Usuário
       await prisma.chatMessage.create({
-        data: {
-          role: 'user',
-          content: message,
-          sessionId: sessionId
-        }
+        data: { role: 'user', content: message, sessionId: sessionId }
       });
-
-      // 2. Resposta da IA
       await prisma.chatMessage.create({
-        data: {
-          role: 'assistant',
-          content: responseText,
-          sessionId: sessionId
-        }
+        data: { role: 'assistant', content: responseText, sessionId: sessionId }
       });
-
-      console.log(`Dados salvos na Sessão ID: ${sessionId}`);
 
     } catch (dbError) {
-      // Loga o erro mas não trava a resposta para o usuário
-      console.error("Erro ao salvar no banco (Prisma):", dbError);
+      console.error("Erro ao salvar no banco:", dbError);
     }
 
-    // Retorna o resultado (e o sessionId caso o front queira usar na próxima)
     return NextResponse.json({ result: responseText });
 
   } catch (unknownError: unknown) {
-    console.error("--- ERRO CRÍTICO NA API ---");
-    console.error(unknownError);
+    console.error("ERRO API:", unknownError);
     
     let errorMessage = "Erro desconhecido";
-    
-    if (unknownError instanceof Error) {
-        errorMessage = unknownError.message;
-    } else if (typeof unknownError === "object" && unknownError !== null && "message" in unknownError) {
-        errorMessage = String((unknownError as { message: unknown }).message);
-    } else if (typeof unknownError === "string") {
-        errorMessage = unknownError;
+    if (unknownError instanceof Error) errorMessage = unknownError.message;
+    else if (typeof unknownError === "string") errorMessage = unknownError;
+
+    // --- DETECÇÃO DO ERRO DE COTA (429) ---
+    // Se o Google disser que acabou a cota, avisamos o front com status 429
+    if (errorMessage.includes('429') || errorMessage.includes('Quota exceeded')) {
+       return NextResponse.json(
+         { error: "Limite de cota da IA atingido. Sistema em pausa técnica." },
+         { status: 429 } 
+       );
     }
 
-    let msg = "Erro interno no servidor.";
-    
-    if (errorMessage.includes('fetch failed')) {
-        msg = "Falha de conexão do Node.js com o Google. Verifique sua internet ou firewall.";
-    }
-    if (errorMessage.includes('404')) msg = "Modelo não encontrado (404).";
-    if (errorMessage.includes('429')) msg = "Sistema sobrecarregado (429).";
-
-    return NextResponse.json({ error: msg, details: errorMessage }, { status: 500 });
+    return NextResponse.json({ error: "Erro interno no servidor." }, { status: 500 });
   }
 }
