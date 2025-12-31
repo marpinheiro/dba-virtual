@@ -1,11 +1,9 @@
 'use client';
 
-// 1. Adicionamos 'useCallback' na importação
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Sidebar } from '@/components/Sidebar';
 
-// --- COMPONENTE INTERNO DE CÓDIGO COM COPY ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const CodeBlock = ({ children, className, ...rest }: any) => {
   const [copied, setCopied] = useState(false);
@@ -72,8 +70,6 @@ interface ApiMessage {
   content: string;
 }
 
-// 2. Movi o getUserId para fora do componente (é uma função pura/auxiliar)
-// Isso evita problemas de dependência no useEffect
 const getUserId = () => {
   if (typeof window === 'undefined') return ''; 
   let userId = localStorage.getItem('dba_user_id');
@@ -85,7 +81,6 @@ const getUserId = () => {
 };
 
 export default function Home() {
-  // --- ESTADOS ---
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -93,14 +88,10 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarLoading, setIsSidebarLoading] = useState(true);
   const [isOnline, setIsOnline] = useState(true);
-
-  // Referência para auto-scroll
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // --- FUNÇÕES DE API ---
-
-  // 3. Envolvi o fetchSessions com useCallback
-  // Agora o React sabe que essa função é estável e não vai causar loops infinitos
+  // --- CORREÇÃO: useCallback para resolver o aviso do useEffect ---
   const fetchSessions = useCallback(async () => {
     try {
       const res = await fetch('/api/history', {
@@ -118,9 +109,9 @@ export default function Home() {
     } finally {
       setIsSidebarLoading(false);
     }
-  }, []); // Dependências vazias = cria apenas uma vez
+  }, []); 
 
-  // 4. Agora podemos adicionar [fetchSessions] na dependência sem medo
+  // Agora fetchSessions é uma dependência segura
   useEffect(() => {
     fetchSessions();
   }, [fetchSessions]);
@@ -220,7 +211,6 @@ export default function Home() {
     }
   };
 
-  // --- RENDERIZAÇÃO ---
   return (
     <div className="flex h-screen bg-gray-900 text-white overflow-hidden font-sans">
       
@@ -230,34 +220,51 @@ export default function Home() {
         onSelectSession={loadSession}
         onNewChat={handleNewChat}
         isLoading={isSidebarLoading}
+        isOpen={isMobileMenuOpen}
+        onClose={() => setIsMobileMenuOpen(false)}
       />
 
-      <main className="flex-1 flex flex-col h-full bg-[#0b141a] relative">
+      <main className="flex-1 flex flex-col h-full bg-[#0b141a] relative w-full">
         
         {/* HEADER */}
-        <header className="px-6 py-4 bg-[#202c33] border-b border-gray-700 flex items-center justify-between shadow-sm z-10">
-          <div className="flex flex-col">
-             <h1 className="text-md font-semibold text-gray-100">
-               {currentSessionId ? 'Sessão Ativa' : 'Nova Consulta'}
-             </h1>
+        <header className="px-4 py-3 sm:px-6 sm:py-4 bg-[#202c33] border-b border-gray-700 flex items-center justify-between shadow-sm z-10">
+          <div className="flex items-center gap-3">
              
-             <span className={`text-xs ${isOnline ? 'text-green-400' : 'text-red-400'} flex items-center gap-1 transition-colors duration-300`}>
-               <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
-               {isOnline ? 'DBA Virtual Online' : 'Serviço em Pausa (Cota Atingida)'}
-             </span>
+             {/* CORREÇÃO: aria-label adicionado */}
+             <button 
+               onClick={() => setIsMobileMenuOpen(true)}
+               aria-label="Abrir menu lateral"
+               className="md:hidden p-1.5 text-gray-400 hover:text-white bg-gray-800/50 rounded-md"
+             >
+               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+                 <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+               </svg>
+             </button>
+
+             <div className="flex flex-col">
+               {/* CORREÇÃO: max-w-50 para remover aviso de arbitrário */}
+               <h1 className="text-sm sm:text-md font-semibold text-gray-100 truncate max-w-50 sm:max-w-none">
+                 {currentSessionId ? 'Sessão Ativa' : 'Nova Consulta'}
+               </h1>
+               
+               <span className={`text-[10px] sm:text-xs ${isOnline ? 'text-green-400' : 'text-red-400'} flex items-center gap-1 transition-colors duration-300`}>
+                 <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
+                 {isOnline ? 'DBA Virtual Online' : 'Pausa Técnica'}
+               </span>
+             </div>
           </div>
         </header>
 
         {/* MENSAGENS */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar bg-[url('/bg-chat-tile.png')] bg-repeat opacity-95">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-4 sm:space-y-6 custom-scrollbar bg-[url('/bg-chat-tile.png')] bg-repeat opacity-95">
           {messages.length === 0 && !isLoading && (
-            <div className="flex flex-col items-center justify-center h-full text-gray-500 opacity-60 space-y-4">
-              <div className={`w-16 h-16 rounded-full flex items-center justify-center ${isOnline ? 'bg-gray-800' : 'bg-red-900/20'}`}>
-                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={`w-8 h-8 ${isOnline ? 'text-green-500' : 'text-red-500'}`}>
+            <div className="flex flex-col items-center justify-center h-full text-gray-500 opacity-60 space-y-4 px-4 text-center">
+              <div className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full flex items-center justify-center ${isOnline ? 'bg-gray-800' : 'bg-red-900/20'}`}>
+                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={`w-7 h-7 sm:w-8 sm:h-8 ${isOnline ? 'text-green-500' : 'text-red-500'}`}>
                    <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
                  </svg>
               </div>
-              <p className="text-lg font-medium">
+              <p className="text-base sm:text-lg font-medium">
                 {isOnline ? 'Como posso ajudar com seu Banco de Dados?' : 'Sistema temporariamente indisponível'}
               </p>
             </div>
@@ -269,7 +276,7 @@ export default function Home() {
               className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
               <div
-                className={`max-w-[85%] sm:max-w-[75%] p-4 rounded-xl shadow-sm text-sm leading-relaxed ${
+                className={`max-w-[90%] sm:max-w-[75%] p-3 sm:p-4 rounded-xl shadow-sm text-sm leading-relaxed ${
                   msg.role === 'user'
                     ? 'bg-[#005c4b] text-white rounded-tr-none' 
                     : 'bg-[#202c33] text-gray-100 rounded-tl-none border border-gray-700/50'
@@ -300,12 +307,13 @@ export default function Home() {
         </div>
 
         {/* INPUT */}
-        <div className="p-4 bg-[#202c33] border-t border-gray-700">
-          <div className="flex items-end gap-3 max-w-4xl mx-auto">
+        <div className="p-3 sm:p-4 bg-[#202c33] border-t border-gray-700">
+          <div className="flex items-end gap-2 sm:gap-3 max-w-4xl mx-auto">
             <textarea
-              className="flex-1 bg-[#2a3942] text-white rounded-lg p-3.5 outline-none focus:ring-1 focus:ring-green-500 resize-none custom-scrollbar min-h-12 max-h-32 placeholder-gray-400 border border-transparent focus:border-green-500/50 transition-all"
+              // CORREÇÃO: min-h-12 (valor padrão) em vez de arbitrário [48px]
+              className="flex-1 bg-[#2a3942] text-white rounded-lg p-3 sm:p-3.5 outline-none focus:ring-1 focus:ring-green-500 resize-none custom-scrollbar min-h-12 max-h-32 placeholder-gray-400 border border-transparent focus:border-green-500/50 transition-all text-sm sm:text-base"
               rows={1}
-              placeholder={isOnline ? "Digite sua query ou dúvida..." : "Sistema em pausa técnica..."}
+              placeholder={isOnline ? "Digite sua query..." : "Aguarde..."}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -315,17 +323,14 @@ export default function Home() {
               onClick={sendMessage}
               disabled={isLoading || !input.trim() || !isOnline}
               aria-label="Enviar mensagem"
-              className={`text-white p-3 rounded-full transition-all shadow-lg flex items-center justify-center h-12 w-12 hover:scale-105 active:scale-95
-                ${isOnline ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700 cursor-not-allowed opacity-50'}
+              className={`text-white p-3 rounded-full transition-all shadow-lg flex items-center justify-center h-12 w-12 shrink-0
+                ${isOnline ? 'bg-green-600 hover:bg-green-700 hover:scale-105 active:scale-95' : 'bg-red-600 hover:bg-red-700 cursor-not-allowed opacity-50'}
               `}
             >
               <svg viewBox="0 0 24 24" height="24" width="24" preserveAspectRatio="xMidYMid meet" version="1.1" x="0px" y="0px" enableBackground="new 0 0 24 24">
                 <path fill="currentColor" d="M1.101,21.757L23.8,12.028L1.101,2.3l0.011,7.912l13.623,1.816L1.112,13.845 L1.101,21.757z"></path>
               </svg>
             </button>
-          </div>
-          <div className="text-center text-[10px] text-gray-500 mt-2 opacity-60">
-            Pressione Enter para enviar
           </div>
         </div>
       </main>

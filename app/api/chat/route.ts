@@ -2,14 +2,13 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
-import { prisma } from "@/lib/prisma"; // Importando a conexão centralizada
+import { prisma } from "@/lib/prisma";
 import dns from 'node:dns';
 
-// Fix DNS para evitar timeouts na conexão
 try {
   dns.setDefaultResultOrder('ipv4first');
 } catch {
-  // Ignora se não suportado
+  // Ignora
 }
 
 export const dynamic = 'force-dynamic';
@@ -22,6 +21,7 @@ DIRETRIZES:
 Seja direto e técnico.
 `;
 
+// --- CORREÇÃO 1: Interface para eliminar o 'any' ---
 interface MessageHistory {
   role: string;
   content: string;
@@ -29,7 +29,7 @@ interface MessageHistory {
 
 export async function POST(req: Request) {
   try {
-    // 1. Rate Limit (Opcional - Proteção contra abuso)
+    // 1. Rate Limit
     if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
       const redis = new Redis({
         url: process.env.UPSTASH_REDIS_REST_URL,
@@ -53,13 +53,16 @@ export async function POST(req: Request) {
 
     const body = await req.json();
     const message: string = body.message;
+    
+    // --- CORREÇÃO 2: Uso da interface aqui ---
     const history: MessageHistory[] = body.history || [];
+    
     const requestSessionId: string | undefined = body.sessionId;
     const userId = req.headers.get("x-user-id") || "anonimo";
 
     let finalMessage = message;
     
-    // Prepara histórico para o formato do Google
+    // --- CORREÇÃO 3: E aqui ---
     const chatHistory = history.map((msg: MessageHistory) => ({
       role: msg.role === 'user' ? 'user' : 'model',
       parts: [{ text: msg.content }],
@@ -75,7 +78,6 @@ export async function POST(req: Request) {
     const result = await chat.sendMessage(finalMessage);
     const responseText = result.response.text();
 
-    // Salvar no Banco
     try {
       let sessionId = requestSessionId;
 
@@ -111,8 +113,6 @@ export async function POST(req: Request) {
     if (unknownError instanceof Error) errorMessage = unknownError.message;
     else if (typeof unknownError === "string") errorMessage = unknownError;
 
-    // --- DETECÇÃO DO ERRO DE COTA (429) ---
-    // Se o Google disser que acabou a cota, avisamos o front com status 429
     if (errorMessage.includes('429') || errorMessage.includes('Quota exceeded')) {
        return NextResponse.json(
          { error: "Limite de cota da IA atingido. Sistema em pausa técnica." },
